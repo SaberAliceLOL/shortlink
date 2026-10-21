@@ -1,0 +1,45 @@
+[project]
+name = "shortlink"
+version = "0.1.0"
+description = "高并发短链服务：业务极简，技术纵深——缓存、压测、可观测性"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiomysql>=0.2.0",
+    "alembic>=1.14",
+    "redis>=5.2",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+]
+
+[dependency-groups]
+dev = [
+    "black>=24.10",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
