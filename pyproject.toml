@@ -7,11 +7,12 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sqlalchemy[asyncio]>=2.0.36",
-    "aiomysql>=0.2.0",
+    "aiomysql[cryptography]>=0.2.0",
     "alembic>=1.14",
     "redis>=5.2",
     "pydantic>=2.10",
     "pydantic-settings>=2.6",
+    "pymysql",
 ]
 
 [dependency-groups]
@@ -28,12 +29,20 @@ dev = [
 line-length = 100
 target-version = ["py312"]
 
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+default = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/*" = ["E", "F", "I", "UP"]  # 生成的迁移代码，不按项目风格管
+"app/**" = ["B008"]  # FastAPI 官方惯例就是 Depends() 放默认参数位
 
 [tool.mypy]
 python_version = "3.12"
