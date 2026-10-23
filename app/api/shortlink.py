@@ -9,7 +9,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.deps import AsyncSessionLocal, get_db, get_redis
+from app.core.deps import get_db, get_idgen, get_redis
 from app.models.url_map import UrlMap
 from app.schemas.shortlink import ShortenRequest, ShortenResponse
 from app.services.idgen import SegmentIDGen
@@ -27,7 +27,7 @@ def _validate_url(raw: str) -> str:
         url = HttpUrl(raw)
     except ValidationError as e:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail=f"非法 URL: {e.errors()[0]['msg']}",
         ) from e
     if url.scheme not in ("http", "https"):
@@ -35,14 +35,15 @@ def _validate_url(raw: str) -> str:
     return str(url)
 
 
-# 发号器是进程级单例：号段缓存的意义就在于此，每个请求共享同一段
-_idgen = SegmentIDGen(AsyncSessionLocal, biz_tag="shortlink")
-
-
+# 发号器通过依赖注入获取：单例由 deps 持有，测试可 overrides 成绑定测试库的实例
 @router.post("/api/shorten", response_model=ShortenResponse, status_code=status.HTTP_201_CREATED)
-async def shorten(payload: ShortenRequest, db: AsyncSession = Depends(get_db)) -> ShortenResponse:
+async def shorten(
+    payload: ShortenRequest,
+    db: AsyncSession = Depends(get_db),
+    idgen: SegmentIDGen = Depends(get_idgen),
+) -> ShortenResponse:
     url = _validate_url(payload.url)
-    code = await _idgen.next_code()
+    code = await idgen.next_code()
 
     row = UrlMap(code=code, url=url)
     db.add(row)

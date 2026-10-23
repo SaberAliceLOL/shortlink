@@ -14,9 +14,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.core.deps import get_db, get_redis
+from app.core.deps import get_db, get_idgen, get_redis
 from app.main import create_app
 from app.models import Base
+from app.services.idgen import SegmentIDGen
 
 
 @pytest_asyncio.fixture
@@ -45,6 +46,7 @@ async def client():
     app = create_app()
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_redis] = lambda: fake_redis
+    app.dependency_overrides[get_idgen] = lambda: SegmentIDGen(session_factory, "shortlink")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
         yield ac

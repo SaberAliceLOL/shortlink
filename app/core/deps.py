@@ -12,6 +12,7 @@ from redis.asyncio import Redis, from_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import Settings, get_settings
+from app.services.idgen import SegmentIDGen
 
 # engine 和 session 工厂是进程级单例（模块导入时创建一次），
 # 真正按请求分配的是 session —— 这就是"连接池"的用法雏形
@@ -44,7 +45,15 @@ def get_app_settings() -> Settings:
     return get_settings()
 
 
-# 路由里的标准写法：db: AsyncSession = Depends(get_db)
+# 发号器单例：号段缓存必须跨请求共享，所以是模块级对象；
+# 但对外暴露的是函数，测试可以用 overrides 换成绑定测试库的实例
+_idgen = SegmentIDGen(AsyncSessionLocal, biz_tag="shortlink")
+
+
+def get_idgen() -> SegmentIDGen:
+    return _idgen
+
+
 __all__ = [
     "engine",
     "AsyncSessionLocal",
@@ -52,4 +61,5 @@ __all__ = [
     "get_db",
     "get_redis",
     "get_app_settings",
+    "get_idgen",
 ]
