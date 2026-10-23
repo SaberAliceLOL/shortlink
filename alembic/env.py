@@ -4,7 +4,7 @@ from sqlalchemy import engine_from_config, pool
 
 from alembic import context
 from app.core.config import get_settings
-from app.models.note import Base
+from app.models import Base  # noqa: 注册全部模型
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -1,4 +1,4 @@
-"""SQLAlchemy 2.0 声明式模型。Day 5 用 notes 表练习；Week 1 换成 url_map。"""
+"""SQLAlchemy 2.0 声明式模型。Day 5 的 notes 表是练习用，Week 1 起主战场是 url_map。"""
 
 from datetime import datetime
 
