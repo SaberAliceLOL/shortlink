@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     app_env: str = "dev"
+    public_host: str = "localhost:8000"
 
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
