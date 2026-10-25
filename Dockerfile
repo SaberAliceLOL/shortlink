@@ -1,4 +1,6 @@
-# syntax=docker/dockerfile:1
+# 不写 # syntax=docker/dockerfile:1：该指令会让构建器先去 Docker Hub 拉
+# 构建前端镜像（docker/dockerfile:1）。服务器无法直连 Docker Hub，构建会卡在
+# 0B 传输上十几分钟。本项目只用基础语法与 COPY --from，内置解析器完全够用。
 
 # ---------- builder：只负责把依赖装进独立 venv ----------
 FROM python:3.12-slim AS builder
@@ -15,8 +17,7 @@ WORKDIR /app
 
 # 先只拷依赖清单：源码变动时这一层仍可命中缓存
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+RUN uv sync --frozen --no-install-project --no-dev
 
 # ---------- runtime：只装 venv + 源码，不带编译工具链 ----------
 FROM python:3.12-slim AS runtime
