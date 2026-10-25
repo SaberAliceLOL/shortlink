@@ -7,7 +7,7 @@ biz_tag 区分业务（预留多实例），max_id 是已分配出去的最大�
 from sqlalchemy import BIGINT, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.note import Base
+from app.models.base import Base
 
 
 class SegmentAlloc(Base):

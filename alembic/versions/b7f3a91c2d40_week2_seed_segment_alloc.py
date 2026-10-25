@@ -28,10 +28,15 @@ STEP = 1000
 
 
 def upgrade() -> None:
-    """插入发号器初始号段。"""
+    """插入发号器初始号段（幂等）。
+
+    用 INSERT IGNORE 而不是裸 INSERT：Week 1 的开发库里如果已经有手工写入的
+    号段行，裸 INSERT 会撞主键让升级中断。迁移必须在"部分数据已存在"的库上
+    也能跑——这正是它存在的意义（新库从零建、老库补齐）。
+    """
     op.execute(
         sa.text(
-            "INSERT INTO segment_alloc (biz_tag, max_id, step) "
+            "INSERT IGNORE INTO segment_alloc (biz_tag, max_id, step) "
             "VALUES ('shortlink', :max_id, :step)"
         ).bindparams(max_id=INIT_MAX_ID, step=STEP)
     )

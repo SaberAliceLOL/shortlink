@@ -6,7 +6,7 @@ from sqlalchemy import CHAR, DateTime, String, func
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.note import Base
+from app.models.base import Base
 
 
 class UrlMap(Base):
