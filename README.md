@@ -47,6 +47,21 @@ bash scripts/deploy.sh           # build → 迁移 → 启动 → 冒烟
 `deploy.sh` 幂等，可重复执行。它做五件事：构建镜像、起 MySQL/Redis、等 healthy、
 跑 `alembic upgrade head`、起 app 与 Nginx 并冒烟测试。
 
+**日常发布**：本地 `git push` → 服务器 `git pull` → `SKIP_BUILD=1 bash scripts/deploy.sh`
+（`SKIP_BUILD=1` 表示复用已加载的镜像；改了应用代码则先用
+`docker save` + `scp` + `docker load` 传新镜像，见下方"镜像分发"）
+
+**镜像分发（服务器拉不了 Docker Hub 时）**：
+
+```bash
+# 本地：构建并导出
+docker compose --env-file .env.prod -f docker-compose.prod.yml build app
+docker save shortlink-app:latest -o shortlink-app.tar
+scp shortlink-app.tar shortlink-server:~/
+# 服务器：加载
+docker load -i ~/shortlink-app.tar
+```
+
 ## API
 
 | 接口 | 说明 |
@@ -98,23 +113,32 @@ bash scripts/deploy.sh           # build → 迁移 → 启动 → 冒烟
 
 ```
 shortlink/
-├── app/
-│   ├── api/shortlink.py     # 两个核心接口：生成 + 302 跳转
-│   ├── core/config.py       # Pydantic Settings，环境变量 → 带类型对象
-│   ├── core/deps.py         # 依赖注入：engine / session / redis / idgen 单例
-│   ├── models/              # SQLAlchemy 模型（url_map、segment_alloc）
-│   ├── schemas/             # Pydantic 请求/响应模型
-│   ├── services/base62.py   # Base62 编解码
-│   ├── services/idgen.py    # 号段式发号器
-│   └── main.py              # 入口 + 路由注册顺序（/health 必须在 /{code} 前）
-├── alembic/versions/        # 迁移：建表 → 号段种子 → 短码排序规则
-├── tests/                   # 35 个测试（单测 + 接口集成，SQLite/fakeredis 替身）
-├── deploy/nginx.conf        # 反代、gzip、XFF 透传
-├── scripts/deploy.sh        # 服务器幂等部署
-├── Dockerfile               # 多阶段构建，非 root
-├── docker-compose.yml       # 本地开发：MySQL + Redis
-├── docker-compose.prod.yml  # 生产：app + MySQL + Redis + Nginx
-└── pyproject.toml           # 依赖、ruff/black/mypy/pytest 配置
+├── app/                          # 应用代码
+│   ├── api/shortlink.py          #   两个核心接口：生成 + 302 跳转 + 埋点
+│   ├── core/config.py            #   Pydantic Settings：环境变量 → 带类型对象
+│   ├── core/deps.py              #   依赖注入：engine / session / redis / idgen 单例
+│   ├── models/url_map.py         #   短码主表（code 用 utf8mb4_bin）
+│   ├── models/segment_alloc.py   #   号段分配表
+│   ├── schemas/shortlink.py      #   请求/响应模型（Pydantic 校验）
+│   ├── services/base62.py        #   Base62 编解码
+│   ├── services/idgen.py         #   号段式发号器（内存发号，耗尽才碰 DB）
+│   └── main.py                   #   入口；/health 必须注册在 /{code} 之前
+├── alembic/
+│   ├── env.py                    #   迁移环境（同步 pymysql 驱动）
+│   └── versions/                 #   建表 → 号段种子 → 短码排序规则
+├── tests/                        # 35 个测试（单测 + 接口集成，SQLite/fakeredis 替身）
+├── deploy/nginx.conf             # 反代、gzip、XFF 透传、keepalive
+├── scripts/deploy.sh             # 服务器幂等部署（支持 SKIP_BUILD=1）
+├── Dockerfile                    # 多阶段构建，非 root uid 10001，内置 HEALTHCHECK
+├── docker-compose.yml            # 本地开发：MySQL + Redis（映射 3306/6379）
+├── docker-compose.prod.yml       # 生产：app + MySQL + Redis + Nginx（只暴露 80）
+├── .env.example                  # 本地开发环境变量模板
+├── .env.prod.example             # 生产环境变量模板（真 .env.prod 不提交）
+├── .dockerignore                 # 构建上下文排除项
+├── .github/workflows/ci.yml      # CI：ruff + black + mypy + pytest
+├── docs/design.md                # 设计文档 + 决策记录 + 面试问答预演
+├── docs/weekly/                  # 每周周报（含卡点与面试素材）
+└── pyproject.toml                # 依赖、ruff/black/mypy/pytest 配置
 ```
 
 ## 本地环境备忘
