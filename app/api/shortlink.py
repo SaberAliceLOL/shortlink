@@ -1,5 +1,6 @@
 """短链核心路由：生成 + 跳转（设计文档 D3/D4）。"""
 
+import logging
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,6 +16,7 @@ from app.schemas.shortlink import ShortenRequest, ShortenResponse
 from app.services.idgen import SegmentIDGen
 
 router = APIRouter(tags=["shortlink"])
+logger = logging.getLogger(__name__)
 
 
 def _now_ms() -> int:
@@ -49,10 +51,12 @@ async def shorten(
     db.add(row)
     try:
         await db.commit()
-    except (
-        Exception
-    ) as e:  # noqa: BLE001  # 主键冲突等写失败：让发号器丢号也无妨（非连续不破坏唯一性）
+    except Exception as e:  # noqa: BLE001
+        # 主键冲突等写失败：发号器丢号无妨（非连续不破坏唯一性），但必须打日志。
+        # 曾经这里是静默 except，并发下大量 IntegrityError 只表现为 500、日志无痕，
+        # 排查时只能靠猜——异常被吞掉是运维事故的常见起点。
         await db.rollback()
+        logger.exception("写入短链失败 code=%s url=%s", code, url[:200])
         raise HTTPException(status_code=500, detail="写入失败") from e
 
     settings = get_settings()

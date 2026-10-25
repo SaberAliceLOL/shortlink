@@ -1,0 +1,25 @@
+# 构建上下文只留运行必需的东西：源码、依赖清单、迁移脚本
+.git
+.github
+.venv
+__pycache__
+*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+htmlcov
+.coverage
+*.sqlite3
+
+# 环境与密钥绝不进镜像
+.env
+.env.*
+!.env.example
+
+# 本地开发用的文档与编排文件不进镜像
+docs
+tests
+docker-compose*.yml
+Dockerfile
+.dockerignore
+README.md

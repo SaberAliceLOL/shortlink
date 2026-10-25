@@ -7,12 +7,17 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sqlalchemy[asyncio]>=2.0.36",
-    "aiomysql[cryptography]>=0.2.0",
+    "aiomysql>=0.2.0",
     "alembic>=1.14",
     "redis>=5.2",
     "pydantic>=2.10",
     "pydantic-settings>=2.6",
-    "pymysql",
+    # MySQL 8 默认 caching_sha2_password，非 TLS 连接要靠 RSA 加密换密码，
+    # 缺 cryptography 时认证直接抛 RuntimeError。注意：aiomysql 0.3 的
+    # extra 名是 rsa（不是 cryptography），装 aiomysql[cryptography] 会静默失效——
+    # 本地 venv 恰好有残留下来的包才没暴露，容器里一跑就 500。
+    # 所以在真正的驱动 PyMySQL 上声明 extra，不依赖上层包转发。
+    "pymysql[rsa]>=1.1",
 ]
 
 [dependency-groups]

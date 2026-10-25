@@ -21,14 +21,13 @@ from app.services.idgen import SegmentIDGen
 
 
 @pytest_asyncio.fixture
-async def client():
+async def session_factory():
+    """裸 session 工厂：给需要直接构造数据的测试用（例如验证 SQL 层语义）。"""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
-    # 种子号段：起点 62^4，步长 1000（生产同款）
-    async with session_factory() as s:
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as s:
         await s.execute(
             text(
                 "INSERT INTO segment_alloc (biz_tag, max_id, step) "
@@ -37,7 +36,12 @@ async def client():
             {"start": 62**4 - 1},
         )
         await s.commit()
+    yield factory
+    await engine.dispose()
 
+
+@pytest_asyncio.fixture
+async def client(session_factory):
     async def override_db():
         async with session_factory() as session:
             yield session
@@ -52,7 +56,6 @@ async def client():
         yield ac
 
     await fake_redis.aclose()
-    await engine.dispose()
 
 
 LONG_URL = "https://example.com/a/very/long/path?with=query&more=1"
@@ -119,6 +122,36 @@ class TestRedirect:
         redis = client._transport.app.dependency_overrides[get_redis]()  # type: ignore[attr-defined]
         items = await redis.lrange("hits", 0, -1)
         assert len(items) == 1 and items[0].startswith(f"{code}|")
+
+
+class TestCodeCaseSensitivity:
+    """短码大小写敏感性的回归防线（Week 2 部署时发现的真实事故）。
+
+    Base62 的 0-9A-Za-z 里大小写是不同字符。MySQL 默认 utf8mb4_unicode_ci
+    不区分大小写，导致：
+      - 写入：'1012w' 与 '1012W' 撞主键 → 并发下 500
+      - 读取：查 '1012w' 命中 '1012W' 的记录 → 跳到别人的链接
+
+    SQLite 的默认比较本就区分大小写，所以这个测试通过**不能**证明 MySQL 侧正确；
+    它防的是应用层把大小写归一化（比如 .lower()）。真正的防线是迁移
+    c4e8d2a6f910 把列改成 utf8mb4_bin，两侧都有测试才闭环。
+    """
+
+    async def test_lowercase_and_uppercase_are_distinct(self, client, session_factory) -> None:
+        async with session_factory() as s:
+            await s.execute(
+                text(
+                    "INSERT INTO url_map (code, url) VALUES "
+                    "('AbCdE', 'https://example.com/lower'), "
+                    "('ABCDE', 'https://example.com/upper')"
+                )
+            )
+            await s.commit()
+
+        lower = await client.get("/AbCdE", follow_redirects=False)
+        upper = await client.get("/ABCDE", follow_redirects=False)
+        assert lower.headers["location"] == "https://example.com/lower"
+        assert upper.headers["location"] == "https://example.com/upper"
 
 
 class TestHealth:

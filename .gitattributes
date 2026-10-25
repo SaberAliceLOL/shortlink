@@ -1,1 +1,10 @@
 * text=auto
+
+# 这些文件会在 Linux 上直接执行或被 Docker/Nginx 读取，
+# CRLF 会造成 "bad interpreter" 与 nginx 配置解析错误，强制 LF
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.conf text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.env.prod.example text eol=lf
