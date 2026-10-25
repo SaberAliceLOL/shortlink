@@ -100,10 +100,50 @@ CREATE TABLE url_map (
 跳转时投递一条 `{code, ts, ip, ua}` 到 Redis list（LPUSH），
 Worker 端聚合后批量落库。本周先写接口 + 单测，链路 Week 6 接。
 
-## 4. 部署形态
+## 4. 部署形态（Week 2 已落地）
 
-Week 1-2 目标：**云服务器 Docker Compose 一键起**（app + MySQL + Redis），
-Nginx 反代 80 → 8000，公网 IP 直接访问（域名+备案 Week 8 前再说）。
+**云服务器 Docker Compose 一键起**：app + MySQL + Redis + Nginx，
+公网 IP 直接访问（域名 + 备案 Week 8 前再说）。线上：http://101.200.80.105
+
+### D5：只有 Nginx 暴露公网端口
+
+`ports` 只给 Nginx 的 80，MySQL/Redis/app 全部在 compose 内部网络按服务名寻址。
+本地开发用的 `docker-compose.yml` 才映射 3306/6379（开发要连）。
+
+理由：数据库端口暴露公网是最常见的事故来源；两套编排各自只开必需的口子，
+而不是靠防火墙"记得关"。
+
+### D6：迁移不进容器启动流程
+
+容器 entrypoint 只启动 uvicorn。`alembic upgrade head` 由 `deploy.sh` 在一次性
+容器里显式执行。这样"发布新代码"和"变更 schema"是两个可独立回滚的动作——
+如果迁移写在启动脚本里，回滚镜像版本时表结构已经改了，会出现新代码旧表或旧代码新表。
+
+### D7：短码列必须用 `utf8mb4_bin`
+
+**这是 Week 2 真实事故，不只是选型。**
+
+Base62 字符集是 `0-9A-Za-z`，大小写是不同字符。但建表时沿用了库默认的
+`utf8mb4_unicode_ci`（大小写不敏感），后果是：
+
+1. 写入：先发 `1012w`、后发 `1012W`，第二条 INSERT 报
+   `Duplicate entry '1012W' for key 'PRIMARY'` → 并发下接口 500
+2. 读取：`WHERE code = '1012w'` 命中 `1012W` 的记录 →
+   **访问者输错大小写会被导向别人的长链**
+
+修法是 `ALTER TABLE url_map MODIFY code ... COLLATE utf8mb4_bin`（迁移 `c4e8d2a6f910`）。
+模型侧用 `with_variant(mysql.CHAR(7, collation="utf8mb4_bin"), "mysql")` 而不是直接写
+`collation=`：后者会把 MySQL 专有排序规则带进单测的 SQLite，`CREATE TABLE` 直接失败。
+
+**面试可讲的点**：这个 bug 在 SQLite 上无法复现（SQLite 默认就区分大小写），
+所以"测试全绿"和"生产正确"之间隔着数据库方言这一层。真正的防线是
+应用层测试 + 数据库层迁移双管，缺一不可。
+
+### D8：号段种子数据必须进迁移
+
+`segment_alloc` 只建表不插行时，发号器 `SELECT ... .one()` 抛 `NoResultFound`，
+新库上第一次写短链必然 500。本地开发靠手工 INSERT 掩盖了这一点。
+迁移 `b7f3a91c2d40` 把初始号段写进去，保证 `upgrade head` 之后的库是可用的。
 
 ## 5. Week 1-2 任务拆解（每天的目标）
 

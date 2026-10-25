@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 服务器侧部署脚本：在服务器上执行，幂等（重复跑不会坏）
 #
-# 为什么不用 git pull：这台服务器访问 GitHub 超时（出口限制），
-# 所以代码由本地 tar 同步过来。这也是真实环境常见情况——
-# 部署流程不能假设“服务器能访问代码托管平台”。
+# 代码更新：git pull（服务器可访问 GitHub）
+# 镜像：默认本地构建；若已用 docker load 预置了 shortlink-app:latest，
+#       设 SKIP_BUILD=1 跳过构建——服务器拉基础镜像时通时不通，
+#       紧急发布时“本地构建 + scp + docker load”是更可靠的路径。
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-$HOME/shortlink}"
@@ -16,8 +17,14 @@ if [[ ! -f .env.prod ]]; then
     exit 1
 fi
 
-echo "==> 1/5 构建镜像"
-$COMPOSE build
+if [[ "${SKIP_BUILD:-0}" == "1" ]]; then
+    echo "==> 1/5 跳过构建（使用已加载的 shortlink-app:latest）"
+    docker image inspect shortlink-app:latest >/dev/null \
+        || { echo "镜像不存在，无法跳过构建" >&2; exit 1; }
+else
+    echo "==> 1/5 构建镜像"
+    $COMPOSE build
+fi
 
 echo "==> 2/5 启动依赖（mysql / redis）"
 $COMPOSE up -d mysql redis
