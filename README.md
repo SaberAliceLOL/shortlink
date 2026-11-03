@@ -66,6 +66,7 @@ docker load -i ~/shortlink-app.tar
 
 | 接口 | 说明 |
 |---|---|
+| `GET /` | 服务首页（接口说明 + 示例，给人看的，不进 OpenAPI） |
 | `POST /api/shorten` | 长链换短码，返回 `{code, short_url, long_url}` |
 | `GET /{code}` | 短码 302 跳转 + 埋点（`code\|timestamp_ms` 进 Redis list） |
 | `GET /health` | 健康检查（供容器探针用） |
