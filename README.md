@@ -20,7 +20,7 @@ curl -X POST http://101.200.80.105/api/shorten \
 
 - [x] Week 0：环境与工程骨架
 - [x] Week 1-2：基础功能跑通（生成 + 302 跳转，**已部署上线**）
-- [ ] Week 3-4：Redis 缓存与三种缓存异常治理
+- [x] Week 3-4：Redis 缓存与三种缓存异常治理 → [技术笔记](docs/cache.md)
 - [ ] Week 5：压测与优化（Locust + py-spy，产出 QPS/P99 数据表）
 - [ ] Week 6：Celery 异步统计、批量聚合落库
 - [ ] Week 7：Prometheus + Grafana 可观测性
@@ -69,6 +69,7 @@ docker load -i ~/shortlink-app.tar
 | `POST /api/shorten` | 长链换短码，返回 `{code, short_url, long_url}` |
 | `GET /{code}` | 短码 302 跳转 + 埋点（`code\|timestamp_ms` 进 Redis list） |
 | `GET /health` | 健康检查（供容器探针用） |
+| `GET /internal/cache-stats` | 缓存命中率 / 回源次数 / 熔断状态 / 过滤器拒绝数（进程内计数，Week 7 交给 Prometheus） |
 
 ## 设计决策记录（为什么这么选）
 
@@ -86,6 +87,12 @@ docker load -i ~/shortlink-app.tar
 | 8 | 迁移不进容器启动流程，由部署脚本显式执行 | 启动与 schema 变更解耦；回滚时不会出现"代码退回但表已改" |
 | 9 | Nginx 不开缓存 | 缓存策略属于应用层（Week 3），两处都缓存会让"缓存命中率"指标失去意义 |
 | 10 | 短码列用 `utf8mb4_bin` | Base62 区分大小写，库默认 `utf8mb4_unicode_ci` 会让 `w` 与 `W` 撞主键、且跳转命中错误记录 |
+| 11 | 穿透用**水位守卫**而非布隆过滤器 | 短码是 Base62(自增 ID)，ID > 已分配 max_id 就一定不存在：O(1) 内存、零假阴性、不用预热。布隆的优势（任意键空间）在这里用不上，代价却全在 |
+| 12 | 击穿用**逻辑过期**而非互斥锁 | 短链不可变，旧值不会错只会旧。实测过期瞬间 P99 19ms vs 互斥锁 82ms vs 无保护 116ms。**前提是数据不可变**，加"修改 URL"接口就必须换回互斥锁 |
+| 13 | 雪崩：TTL 抖动 + 熔断降级 | 抖动只挡"集体过期"，挡不住"Redis 挂掉"；后者靠熔断把每请求一次超时摊成每冷却期一次探测 |
+| 14 | Redis 是加速器不是数据源 | 所有 Redis 操作吞异常 + 降级查库；前置过滤器故障时必须**放行**（误杀真实链接比多查一次库严重得多） |
+| 15 | 写入路径主动覆盖负缓存 | 短码可预测，攻击者能提前把 404 预埋到未生成的号上；新建链接必须覆盖而非等自然过期 |
+| 16 | uvloop 只做开关不预设结论 | 实测 QPS 无提升、P99 从 82ms 降到 46ms（两轮复现）；只报 QPS 会得出错误结论 |
 
 ## 部署踩坑记录（都是真实事故，面试可直接讲）
 
@@ -98,35 +105,93 @@ docker load -i ~/shortlink-app.tar
 | 新库上第一次 `POST /api/shorten` 必 500 | `segment_alloc` 只建表、从不插初始号段；本地靠手工 INSERT 掩盖 | 加迁移 `b7f3a91c2d40` 初始化号段行，纳入 `upgrade head` |
 | 构建卡在 `docker/dockerfile:1` 十几分钟 0B | Dockerfile 首行 `# syntax=` 指令强制从 Docker Hub 拉构建前端，服务器只配了镜像加速 | 删掉该指令，用内置解析器 |
 
-## 压测数据表（Week 5 填）
+## 压测数据表
 
-| 优化步骤 | QPS | P99 (ms) | 备注 |
+> 本机实测（16 核 / 7.5G WSL2，MySQL 8.4 + Redis 7.4 在 Docker 内），
+> **不是**云服务器数据。完整分析与复现命令见 [docs/cache.md](docs/cache.md)。
+> Week 5 会用 Locust + py-spy 重做一遍并补本地 LRU。
+
+### 进程内对照（100 并发，每轮 4000 请求，50 个热点短码）
+
+| 优化步骤 | QPS | P50 (ms) | P99 (ms) | DB 回源 | 备注 |
+|---|---|---|---|---|---|
+| 基线（无缓存） | 1583 | 53.9 | 334 | 4000 | 每个请求都查库 |
+| + Redis Cache Aside | 4003 | 13.4 | 299 | 99 | 命中率 97.5% |
+| + 水位前置过滤 | 5831 | 13.9 | 113 | 100 | 尾延迟明显改善 |
+| + 本地 LRU | - | - | - | - | Week 5 |
+
+### 击穿策略对比（100 并发打同一热点，1000 请求）
+
+| 场景 | QPS | P99 (ms) | DB 回源 | 说明 |
+|---|---|---|---|---|
+| 冷启动 · 无保护 | 4193 | 120 | 100 | 全部并发回源 |
+| 冷启动 · 互斥锁 | 4620 | 110 | **1** | 锁把回源压到 1 次 |
+| 冷启动 · 逻辑过期 | 4302 | 122 | 100 | **退化**：没有旧值可返回 |
+| 过期瞬间 · 无保护 | 4479 | 116 | 100 | |
+| 过期瞬间 · 互斥锁 | 5357 | 82 | **1** | 其余请求排队或复用 |
+| 过期瞬间 · 逻辑过期 | **6905** | **19** | **1** | 旧值立即返回，刷新后台做 |
+
+### 穿透治理（2000 请求，20 个不存在的短码）
+
+| 场景 | QPS | P99 (ms) | DB 回源 |
 |---|---|---|---|
-| 基线（无缓存） | - | - | |
-| + Redis Cache Aside | - | - | |
-| + 本地 LRU | - | - | |
-| + uvloop | - | - | |
+| 未来号 · 无防护 | 1331 | 161 | 2000 |
+| 未来号 · 负缓存 | 5365 | 118 | 100 |
+| 未来号 · 负缓存 + 水位过滤 | **34274** | **3.6** | **0** |
+| 号段内空洞 · 无防护 | 1391 | 157 | 2000 |
+| 号段内空洞 · 负缓存 | 4950 | 152 | 100 |
+| 号段内空洞 · 负缓存 + 水位过滤 | 5431 | 125 | 100 |
+
+两类必须分开看：过滤器对"未来号"直接拒（连 Redis 都不碰），
+对"号段内空洞"完全无效——那只能靠负缓存。
+
+### HTTP 层与 uvloop（真实 uvicorn + TCP，50 并发 × 8s）
+
+| 场景 | QPS | P50 (ms) | P99 (ms) |
+|---|---|---|---|
+| asyncio + 无缓存 | 619 | 64.6 | 282 |
+| asyncio + 逻辑过期 | 1278 | 34.3 | 82 |
+| uvloop + 逻辑过期 | 1281 | 35.8 | **46** |
+| asyncio + 互斥锁 | 1209 | 35.4 | 96 |
+| uvloop + 互斥锁 | 1191 | 38.9 | **46** |
+
+uvloop 提升的是尾延迟（P99 82→46ms，两轮复现），不是吞吐。
+瓶颈在 Redis/MySQL 的 IO 等待而非事件循环，所以改善的是调度抖动。
 
 <!-- 这张表是简历上 "QPS xxxx" 那句话的唯一依据。没有数据不要写数字。 -->
+
+### 复现
+
+```bash
+docker compose up -d && uv run alembic upgrade head
+uv run python -m scripts.bench_cache   # 进程内：策略 × 三种异常
+uv run python -m scripts.bench_http    # HTTP 层：uvloop / 策略对比
+```
 
 ## 项目结构
 
 ```
 shortlink/
 ├── app/                          # 应用代码
-│   ├── api/shortlink.py          #   两个核心接口：生成 + 302 跳转 + 埋点
-│   ├── core/config.py            #   Pydantic Settings：环境变量 → 带类型对象
-│   ├── core/deps.py              #   依赖注入：engine / session / redis / idgen 单例
+│   ├── api/shortlink.py          #   两个核心接口：生成 + 302 跳转（只管 HTTP 形状）
+│   ├── core/config.py            #   Pydantic Settings：缓存/连接池/守卫全部可配
+│   ├── core/deps.py              #   依赖注入：engine / session / redis / idgen / service
 │   ├── models/url_map.py         #   短码主表（code 用 utf8mb4_bin）
 │   ├── models/segment_alloc.py   #   号段分配表
 │   ├── schemas/shortlink.py      #   请求/响应模型（Pydantic 校验）
-│   ├── services/base62.py        #   Base62 编解码
+│   ├── services/base62.py        #   Base62 编解码 + 格式校验
 │   ├── services/idgen.py         #   号段式发号器（内存发号，耗尽才碰 DB）
+│   ├── services/cache.py         #   Cache Aside + 互斥锁/逻辑过期 + 熔断降级
+│   ├── services/prefilter.py     #   穿透前置过滤：水位守卫 + 布隆（对比实现）
+│   ├── services/shortlink_service.py  # 三级过滤的编排
+│   ├── runtime.py                #   启动入口（BENCH_LOOP=asyncio|uvloop）
 │   └── main.py                   #   入口；/health 必须注册在 /{code} 之前
 ├── alembic/
 │   ├── env.py                    #   迁移环境（同步 pymysql 驱动）
 │   └── versions/                 #   建表 → 号段种子 → 短码排序规则
-├── tests/                        # 35 个测试（单测 + 接口集成，SQLite/fakeredis 替身）
+├── scripts/bench_cache.py        #   进程内对照压测：策略 × 三种缓存异常
+├── scripts/bench_http.py         #   HTTP 层压测：uvloop / 策略对比
+├── tests/                        # 91 个测试（缓存/穿透/编排/接口，SQLite+fakeredis 替身）
 ├── deploy/nginx.conf             # 反代、gzip、XFF 透传、keepalive
 ├── scripts/deploy.sh             # 服务器幂等部署（支持 SKIP_BUILD=1）
 ├── Dockerfile                    # 多阶段构建，非 root uid 10001，内置 HEALTHCHECK
@@ -137,6 +202,7 @@ shortlink/
 ├── .dockerignore                 # 构建上下文排除项
 ├── .github/workflows/ci.yml      # CI：ruff + black + mypy + pytest
 ├── docs/design.md                # 设计文档 + 决策记录 + 面试问答预演
+├── docs/cache.md                 # 缓存层技术笔记（三种异常 + 实测数据）
 ├── docs/weekly/                  # 每周周报（含卡点与面试素材）
 └── pyproject.toml                # 依赖、ruff/black/mypy/pytest 配置
 ```

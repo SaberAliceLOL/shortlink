@@ -6,122 +6,95 @@
   - 依赖注入让替换成为一行 dependency_overrides（Week 0 讲的 DI 价值在这里兑现）
 
 真 MySQL 的行为（字符集、索引、认证插件）由 Week 5 压测和手工验证覆盖。
+夹具在 tests/conftest.py；缓存/穿透细节见 tests/test_cache.py、tests/test_prefilter.py。
 """
 
-import pytest_asyncio
-from fakeredis.aioredis import FakeRedis
-from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.core.deps import get_db, get_idgen, get_redis
-from app.main import create_app
-from app.models import Base
-from app.services.idgen import SegmentIDGen
-
-
-@pytest_asyncio.fixture
-async def session_factory():
-    """裸 session 工厂：给需要直接构造数据的测试用（例如验证 SQL 层语义）。"""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as s:
-        await s.execute(
-            text(
-                "INSERT INTO segment_alloc (biz_tag, max_id, step) "
-                "VALUES ('shortlink', :start, 1000)"
-            ),
-            {"start": 62**4 - 1},
-        )
-        await s.commit()
-    yield factory
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def client(session_factory):
-    async def override_db():
-        async with session_factory() as session:
-            yield session
-
-    fake_redis = FakeRedis(decode_responses=True)
-    app = create_app()
-    app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_redis] = lambda: fake_redis
-    app.dependency_overrides[get_idgen] = lambda: SegmentIDGen(session_factory, "shortlink")
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as ac:
-        yield ac
-
-    await fake_redis.aclose()
-
+from app.core.deps import get_shortlink_service
 
 LONG_URL = "https://example.com/a/very/long/path?with=query&more=1"
 
 
 class TestShorten:
-    async def test_create_returns_code_and_short_url(self, client) -> None:
-        resp = await client.post("/api/shorten", json={"url": LONG_URL})
+    async def test_create_returns_code_and_short_url(self, http) -> None:
+        resp = await http.post("/api/shorten", json={"url": LONG_URL})
         assert resp.status_code == 201
         body = resp.json()
         assert body["long_url"] == LONG_URL
         assert len(body["code"]) == 5
         assert body["short_url"].endswith("/" + body["code"])
 
-    async def test_codes_are_distinct(self, client) -> None:
+    async def test_codes_are_distinct(self, http) -> None:
         codes = {
-            (await client.post("/api/shorten", json={"url": f"{LONG_URL}#{i}"})).json()["code"]
+            (await http.post("/api/shorten", json={"url": f"{LONG_URL}#{i}"})).json()["code"]
             for i in range(5)
         }
         assert len(codes) == 5
 
-    async def test_reject_javascript_scheme(self, client) -> None:
-        resp = await client.post("/api/shorten", json={"url": "javascript:alert(1)"})
+    async def test_reject_javascript_scheme(self, http) -> None:
+        resp = await http.post("/api/shorten", json={"url": "javascript:alert(1)"})
         assert resp.status_code == 422
 
-    async def test_reject_ftp_scheme(self, client) -> None:
-        resp = await client.post("/api/shorten", json={"url": "ftp://example.com/f"})
+    async def test_reject_ftp_scheme(self, http) -> None:
+        resp = await http.post("/api/shorten", json={"url": "ftp://example.com/f"})
         assert resp.status_code == 422
 
-    async def test_reject_too_long_url(self, client) -> None:
-        resp = await client.post("/api/shorten", json={"url": "https://e.com/" + "a" * 2100})
+    async def test_reject_too_long_url(self, http) -> None:
+        resp = await http.post("/api/shorten", json={"url": "https://e.com/" + "a" * 2100})
         assert resp.status_code == 422
 
-    async def test_reject_missing_url(self, client) -> None:
-        resp = await client.post("/api/shorten", json={})
+    async def test_reject_missing_url(self, http) -> None:
+        resp = await http.post("/api/shorten", json={})
         assert resp.status_code == 422
 
 
 class TestRedirect:
-    async def test_302_with_location(self, client) -> None:
-        code = (await client.post("/api/shorten", json={"url": LONG_URL})).json()["code"]
-        resp = await client.get(f"/{code}", follow_redirects=False)
+    async def test_302_with_location(self, http) -> None:
+        code = (await http.post("/api/shorten", json={"url": LONG_URL})).json()["code"]
+        resp = await http.get(f"/{code}", follow_redirects=False)
         assert resp.status_code == 302
         assert resp.headers["location"] == LONG_URL
 
-    async def test_second_hit_uses_cache(self, client) -> None:
-        code = (await client.post("/api/shorten", json={"url": LONG_URL})).json()["code"]
-        first = await client.get(f"/{code}", follow_redirects=False)
-        second = await client.get(f"/{code}", follow_redirects=False)
+    async def test_second_hit_uses_cache(self, http) -> None:
+        code = (await http.post("/api/shorten", json={"url": LONG_URL})).json()["code"]
+        first = await http.get(f"/{code}", follow_redirects=False)
+        second = await http.get(f"/{code}", follow_redirects=False)
         assert first.headers["location"] == second.headers["location"] == LONG_URL
 
-    async def test_unknown_code_404(self, client) -> None:
-        assert (await client.get("/zzzzz", follow_redirects=False)).status_code == 404
+    async def test_unknown_code_404(self, http) -> None:
+        assert (await http.get("/zzzzz", follow_redirects=False)).status_code == 404
 
-    async def test_malformed_code_404(self, client) -> None:
+    async def test_malformed_code_404(self, http) -> None:
         # 太短 / 含非法字符 → 404（不暴露"格式错"的 422）
-        assert (await client.get("/ab", follow_redirects=False)).status_code == 404
-        assert (await client.get("/abc-de", follow_redirects=False)).status_code == 404
+        assert (await http.get("/ab", follow_redirects=False)).status_code == 404
+        assert (await http.get("/abc-de", follow_redirects=False)).status_code == 404
 
-    async def test_hit_recorded(self, client) -> None:
-        code = (await client.post("/api/shorten", json={"url": LONG_URL})).json()["code"]
-        await client.get(f"/{code}", follow_redirects=False)
+    async def test_non_ascii_digit_rejected_before_storage(self, http) -> None:
+        """全角数字是 isalnum()=True 的字符，但不是 Base62，必须直接 404。"""
+        assert (await http.get("/１２３４５", follow_redirects=False)).status_code == 404
+
+    async def test_hit_recorded(self, http, fake_redis) -> None:
+        code = (await http.post("/api/shorten", json={"url": LONG_URL})).json()["code"]
+        await http.get(f"/{code}", follow_redirects=False)
         # 埋点格式：code|timestamp_ms
-        redis = client._transport.app.dependency_overrides[get_redis]()  # type: ignore[attr-defined]
-        items = await redis.lrange("hits", 0, -1)
+        items = await fake_redis.lrange("hits", 0, -1)
         assert len(items) == 1 and items[0].startswith(f"{code}|")
+
+    async def test_unknown_code_is_negatively_cached(self, http, fake_redis) -> None:
+        """穿透治理的接口层验证：第二次访问不再回源。"""
+        await http.get("/zzzz1", follow_redirects=False)
+        assert await fake_redis.get("u:zzzz1") is not None
+
+    async def test_cache_stats_endpoint(self, http) -> None:
+        code = (await http.post("/api/shorten", json={"url": LONG_URL})).json()["code"]
+        await http.get(f"/{code}", follow_redirects=False)
+        await http.get(f"/{code}", follow_redirects=False)
+        stats = (await http.get("/internal/cache-stats")).json()
+        # 创建时预热了缓存，所以两次读都命中，一次 DB 都没碰
+        assert stats["lookups"] == 2
+        assert stats["hits"] == 2
+        assert stats["misses"] == 0
 
 
 class TestCodeCaseSensitivity:
@@ -133,11 +106,11 @@ class TestCodeCaseSensitivity:
       - 读取：查 '1012w' 命中 '1012W' 的记录 → 跳到别人的链接
 
     SQLite 的默认比较本就区分大小写，所以这个测试通过**不能**证明 MySQL 侧正确；
-    它防的是应用层把大小写归一化（比如 .lower()）。真正的防线是迁移
-    c4e8d2a6f910 把列改成 utf8mb4_bin，两侧都有测试才闭环。
+    它防的是应用层把大小写归一化（比如 .lower()），以及缓存键把两个短码混成一个。
+    真正的防线是迁移 c4e8d2a6f910 把列改成 utf8mb4_bin，两侧都有测试才闭环。
     """
 
-    async def test_lowercase_and_uppercase_are_distinct(self, client, session_factory) -> None:
+    async def test_lowercase_and_uppercase_are_distinct(self, http, session_factory) -> None:
         async with session_factory() as s:
             await s.execute(
                 text(
@@ -148,15 +121,59 @@ class TestCodeCaseSensitivity:
             )
             await s.commit()
 
-        lower = await client.get("/AbCdE", follow_redirects=False)
-        upper = await client.get("/ABCDE", follow_redirects=False)
+        lower = await http.get("/AbCdE", follow_redirects=False)
+        upper = await http.get("/ABCDE", follow_redirects=False)
         assert lower.headers["location"] == "https://example.com/lower"
         assert upper.headers["location"] == "https://example.com/upper"
 
 
 class TestHealth:
-    async def test_health_not_shadowed_by_code_route(self, client) -> None:
+    async def test_health_not_shadowed_by_code_route(self, http) -> None:
         """兜底路由 /{code} 不能吃掉 /health——路由顺序的回归防线。"""
-        resp = await client.get("/health")
+        resp = await http.get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
+
+    async def test_internal_stats_not_shadowed(self, http) -> None:
+        assert (await http.get("/internal/cache-stats")).status_code == 200
+
+
+class TestLanding:
+    """根路径落地页。
+
+    这一页的失败模式很隐蔽：路由被 /{code} 吃掉时会返回 404 而不是抛错，
+    所以既要测状态码，也要测它确实渲染出了内容。
+    """
+
+    async def test_root_returns_html(self, http) -> None:
+        resp = await http.get("/")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/html")
+        assert "ShortLink" in resp.text
+
+    async def test_root_lists_real_endpoints(self, http) -> None:
+        body = (await http.get("/")).text
+        for path in ("/api/shorten", "/health", "/internal/cache-stats", "/docs"):
+            assert path in body, f"首页没有提到 {path}"
+
+    async def test_root_uses_request_host(self, http) -> None:
+        """示例 curl 里的 host 必须跟着实际访问地址走，不能写死。"""
+        resp = await http.get("/", headers={"host": "example.test:9999"})
+        assert "http://example.test:9999/api/shorten" in resp.text
+
+    async def test_root_not_shadowed_by_code_route(self, http) -> None:
+        """空路径不能被当成短码去查库。"""
+        assert (await http.get("/", follow_redirects=False)).status_code == 200
+
+    async def test_root_not_in_openapi_schema(self, http) -> None:
+        """落地页是给人看的，不该出现在 API 文档里。"""
+        schema = (await http.get("/openapi.json")).json()
+        assert "/" not in schema["paths"]
+
+
+def test_service_is_overridden_by_dependency_injection(client) -> None:
+    """夹具必须真的换掉了生产 service——否则测试会连到本地 MySQL/Redis。"""
+    from tests.conftest import build_service  # noqa: F401
+
+    _, service = client
+    assert service is not get_shortlink_service()
